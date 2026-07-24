@@ -72,6 +72,7 @@ def run_ppo(
                 "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}
             },
             num_cpus=num_cpus,
+            object_store_memory=4_000_000_000,   
         )
 
     runner = TaskRunner.remote()
