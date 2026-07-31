@@ -462,6 +462,8 @@ class AgentModeDaemon:
                         "litellm_params": {
                             "model": "hosted_vllm/" + model_name,
                             "api_base": f"http://{address}/v1/",
+                            "timeout": 31536000,
+                            "stream_timeout": 31536000
                         },
                     }
                 )
@@ -568,8 +570,8 @@ class AgentModeDaemon:
                             mode="train" if is_train else "val",
                             resources_id=resources_id,
                             config=RolloutConfig(
-                                unresponsive_seconds=self.llm_timeout_seconds,
-                                timeout_seconds=self.llm_timeout_seconds,
+                                unresponsive_seconds=None,
+                                timeout_seconds=None,
                             ),
                             metadata=task_metadata,
                         )
@@ -820,10 +822,16 @@ class AgentModeDaemon:
         # 1. Reconstruct the `finished_id_to_sample_info` structure from completed rollouts
         finished_id_to_sample_info: Dict[str, Dict[str, Any]] = {}
         finished_id_to_final_reward: Dict[str, float] = {}
+        dropped_rollout_ids: List[str] = []
         sample_with_reward_count = 0
         for rollout_id, rollout in self._completed_rollouts_v0.items():
             original_sample = self._task_id_to_original_sample[rollout_id]
             sample_with_reward_count += int(rollout.final_reward is not None)
+
+            if rollout.final_reward is None:
+                dropped_rollout_ids.append(rollout_id)
+                continue
+
             final_reward = self._fillna_reward(rollout)
 
             if not rollout.triplets:
@@ -849,7 +857,18 @@ class AgentModeDaemon:
             }
             finished_id_to_sample_info[rollout_id] = info
             finished_id_to_final_reward[rollout_id] = final_reward
-        #
+
+        if dropped_rollout_ids:
+            print(
+                f"Dropped {len(dropped_rollout_ids)}/{self._total_tasks_queued} rollouts with no "
+                f"reward (infrastructure failure) at step {global_steps}: {dropped_rollout_ids}"
+            )
+        if not finished_id_to_sample_info:
+            raise RuntimeError(
+                f"All {self._total_tasks_queued} rollouts at step {global_steps} produced no "
+                f"trainable data ({len(dropped_rollout_ids)} without reward). Nothing to train on."
+            )
+
         # --- Data processing and tensor creation logic ---
         # Get all the reported data.
         # prompt_ids are left-padded.
@@ -1023,6 +1042,18 @@ class AgentModeDaemon:
         else:
             raise ValueError(f"Unknown trace_aggregator level: {self.trace_aggregator.get('level')}")
 
+        group_rewards: Dict[str, List[float]] = defaultdict(list)
+        for data_id, reward in zip(data_id_list, reward_list):
+            group_rewards[data_id].append(reward)
+        n_singleton = sum(1 for rs in group_rewards.values() if len(rs) == 1)
+        n_zero_var = sum(1 for rs in group_rewards.values() if len(rs) > 1 and np.std(rs) == 0.0)
+        if n_singleton or n_zero_var:
+            print(
+                f"Step {global_steps}: {n_singleton} single-row and {n_zero_var} zero-variance "
+                f"groups out of {len(group_rewards)}. Single-row groups get raw reward as advantage."
+            )
+
+
         n_transition = len(input_ids_list)
         batch_input_ids = torch.LongTensor(input_ids_list).to(device)
         input_attention_mask = torch.LongTensor(input_attention_mask_list).to(device)
@@ -1054,7 +1085,7 @@ class AgentModeDaemon:
             position_ids = torch.clamp(torch.cumsum(attention_mask, dim=-1) - 1, min=0)
 
         is_drop_mask = torch.BoolTensor(is_drop_list).to(device)
-        scores = torch.tensor(reward_list, dtype=torch.bfloat16).to(device)
+        scores = torch.tensor(reward_list, dtype=torch.float32).to(device)
 
         # Create token-level scores by placing the final reward at the last token position
         token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)
@@ -1098,6 +1129,10 @@ class AgentModeDaemon:
             "training/n_rollouts_w_reward": sample_with_reward_count,
             "training/n_truncated_triplets": n_trunc_sample_because_of_response,
             "training/n_triplets": n_transition,
+            "training/n_rollouts_dropped": len(dropped_rollout_ids),
+            "training/n_groups": len(group_rewards),
+            "training/n_groups_singleton": n_singleton,
+            "training/n_groups_zero_var": n_zero_var,
             # log data, only for debug testing
             **(
                 {

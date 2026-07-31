@@ -1226,7 +1226,8 @@ class LLMProxy:
                 fp,
             )
 
-        save_worker_config(config=self._config_file)
+        # save_worker_config(config=self._config_file)
+        save_worker_config(config=self._config_file, request_timeout=0)
 
         # NOTE: When running the _serve_context in current process, you might encounter the following problems:
         # Problem 1: in litellm worker, <Queue at 0x70f1d028cd90 maxsize=50000> is bound to a different event loop
