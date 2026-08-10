@@ -383,6 +383,10 @@ class AgentLightningTrainer(RayPPOTrainer):
             n_remained_transition = n_transition // mini_batch_size * mini_batch_size
             batch = batch[list(range(n_remained_transition))]
             metrics["training/n_triplets_dropped_remainder"] = n_transition - n_remained_transition
+            if n_remained_transition == 0:
+                print(f"Step {self.global_steps}: only {n_transition} transitions after drops "
+                      f"(< ppo_mini_batch_size={mini_batch_size}); skipping update.")
+                return metrics
 
             # Agent mode note: Change the order of balance batch;
             #     1. first calculate advantage

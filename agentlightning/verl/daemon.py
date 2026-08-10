@@ -609,6 +609,16 @@ class AgentModeDaemon:
             print(f"Failed to set up data on server: {e}")
             raise
 
+
+    def _degenerate_reason(self, rollout) -> Optional[str]:
+        """Return a reason string if this rollout has no trainable tokens, else None."""
+        for i, t in enumerate(rollout.triplets):
+            if not t.prompt.get("token_ids", []):
+                return f"empty_prompt_turn{i}"
+            if not t.response.get("token_ids", []):
+                return f"empty_response_turn{i}"
+        return None
+
     def _validate_data(self, rollout: RolloutLegacy):
         if rollout.final_reward is None:
             print(
@@ -628,7 +638,7 @@ class AgentModeDaemon:
 
         1. Task: construct from Rollout
         2. Triplets: obtained by querying spans and feeding into the adapter
-        3. Final reward: extracted from last triplet's reward, searching backwards if not found
+        3. Final reward: episode best (max over triplet rewards)
         """
         # Query spans for this rollout (latest attempt)
         spans = await self.store.query_spans(rollout.rollout_id, attempt_id="latest")
@@ -639,15 +649,18 @@ class AgentModeDaemon:
             triplets = []
         else:
             triplets = self.adapter.adapt(spans)
+            print(f"[reward-map] {rollout.rollout_id}: {[t.reward for t in triplets]}")
 
         # Extract final reward from triplets
-        final_reward: Optional[float] = None
-        if triplets:
-            # Search backwards through triplets for the first non-None reward
-            for triplet in reversed(triplets):
-                if triplet.reward is not None:
-                    final_reward = triplet.reward
-                    break
+        # final_reward: Optional[float] = None
+        # if triplets:
+        #     # Search backwards through triplets for the first non-None reward
+        #     for triplet in reversed(triplets):
+        #         if triplet.reward is not None:
+        #             final_reward = triplet.reward
+        #             break
+        rewards_present = [t.reward for t in triplets if t.reward is not None]
+        final_reward = max(rewards_present) if rewards_present else None
 
         # Construct the Task object from Rollout
         task = Task(
@@ -839,6 +852,16 @@ class AgentModeDaemon:
                 print(f"Warning: No triplets found for training rollout {rollout.rollout_id}, skipping.")
                 continue
 
+            reason = self._degenerate_reason(rollout)
+            if reason is not None:
+                dropped_rollout_ids.append(rollout_id)
+                finished_id_to_final_reward[rollout_id] = final_reward
+                print(
+                    f"Dropping rollout {rollout_id} at step {global_steps}: {reason} "
+                    f"(infrastructure failure, no trainable tokens)"
+                )
+                continue
+
             # The client should report triplets that contain prompt_ids and response_ids.
             # Example triplet.prompt: {"token_ids": [...], "image_urls": [...]}
             # Example triplet.response: {"token_ids": [...]}
@@ -847,6 +870,7 @@ class AgentModeDaemon:
                     "prompt_ids": t.prompt.get("token_ids", []),
                     "response_ids": t.response.get("token_ids", []),
                     "image_urls": t.prompt.get("image_urls", []),
+                    "reward": t.reward,
                 }
                 for t in rollout.triplets
             ]
@@ -860,13 +884,13 @@ class AgentModeDaemon:
 
         if dropped_rollout_ids:
             print(
-                f"Dropped {len(dropped_rollout_ids)}/{self._total_tasks_queued} rollouts with no "
-                f"reward (infrastructure failure) at step {global_steps}: {dropped_rollout_ids}"
+                f"Dropped {len(dropped_rollout_ids)}/{self._total_tasks_queued} untrainable rollouts "
+                f"at step {global_steps}: {dropped_rollout_ids}"
             )
         if not finished_id_to_sample_info:
             raise RuntimeError(
                 f"All {self._total_tasks_queued} rollouts at step {global_steps} produced no "
-                f"trainable data ({len(dropped_rollout_ids)} without reward). Nothing to train on."
+                f"trainable data ({len(dropped_rollout_ids)} dropped). Nothing to train on."
             )
 
         # --- Data processing and tensor creation logic ---
@@ -894,8 +918,9 @@ class AgentModeDaemon:
         if self.trace_aggregator.get("level", "transition") == "transition":
             for rollout_id, sample_info in finished_id_to_sample_info.items():
                 for turn_index, trace in enumerate(sample_info["trace_list"]):
-
-                    reward_list.append(sample_info["reward"])
+                    turn_reward = trace.get("reward")
+                    reward_list.append(sample_info["reward"] if turn_reward is None else float(turn_reward))
+                    # reward_list.append(sample_info["reward"])
                     prompt_ids, response_ids = trace["prompt_ids"], trace["response_ids"]
 
                     # Mark samples with prompts exceeding max_prompt_length to be dropped later
