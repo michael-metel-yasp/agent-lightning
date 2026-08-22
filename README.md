@@ -40,7 +40,7 @@ For the latest nightly build (cutting-edge features), you can install from Test 
 pip install --upgrade --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ --pre agentlightning
 ```
 
-Please refer to our [installation guide](https://microsoft.github.io/agent-lightning/stable/tutorials/installation/) for more details.
+Please refer to our [installation guide](https://github.com/microsoft/agent-lightning/blob/v0.2.1/docs/tutorials/installation.md) for more details.
 
 To start using Agent-lightning, check out our [documentation](https://microsoft.github.io/agent-lightning/) and [examples](./examples).
 
