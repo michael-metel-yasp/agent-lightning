@@ -364,6 +364,23 @@ class AgentLightningTrainer(RayPPOTrainer):
                     norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                     config=self.config.algorithm,
                 )
+                # ---- TEMP DIAGNOSTIC: verify the no-baseline advantage estimator ----
+                adv = batch.batch["advantages"]
+                if "response_mask" in batch.batch:
+                    mask = batch.batch["response_mask"]
+                else:
+                    mask = batch.batch["attention_mask"][:, -adv.size(1):]
+                n_tok = mask.sum(-1)
+                per = (adv * mask).sum(-1) / n_tok.clamp(min=1)
+                msg = (
+                    f"[adv] estimator={self.config.algorithm.adv_estimator} n={len(per)} "
+                    f"min={per.min():.4f} mean={per.mean():.4f} max={per.max():.4f} "
+                    f"zero_rows={(adv.abs().sum(-1) == 0).sum().item()} min_tok={int(n_tok.min())}"
+                )
+                if "token_level_rewards" in batch.batch:
+                    msg += f" reward_mean={batch.batch['token_level_rewards'].sum(-1).mean():.4f}"
+                print(msg, flush=True)
+                # ---- END TEMP DIAGNOSTIC ----
 
             # Calculate the metrics before processing. Refer to the comments of function `compute_data_metrics` for details.
             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic, suffix="_before_processing"))

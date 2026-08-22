@@ -914,6 +914,7 @@ class AgentModeDaemon:
         is_drop_list: List[bool] = []
         image_grid_thw_list: List[Optional[torch.Tensor]] = []  # For Qwen2-VL mrope
         n_trunc_sample_because_of_response = 0
+        _dump = []   # TEMP DIAGNOSTIC
 
         if self.trace_aggregator.get("level", "transition") == "transition":
             for rollout_id, sample_info in finished_id_to_sample_info.items():
@@ -955,6 +956,17 @@ class AgentModeDaemon:
                     if self._use_mrope:
                         image_urls = trace.get("image_urls", [])
                         image_grid_thw_list.append(self._get_image_grid_thw(image_urls))
+                    
+                    _dump.append((
+                        sample_info["data_id"][:8],
+                        rollout_id[-6:],
+                        turn_index,
+                        sample_info["reward"],          # rollout-level value
+                        trace.get("reward"),            # per-turn value, None if not plumbed
+                        reward_list[-1],                # what actually gets used
+                        len(trace["prompt_ids"]),
+                        len(trace["response_ids"]),
+                    ))                    
 
         elif self.trace_aggregator.get("level", "transition") == "trajectory":
             assert not self._use_mrope, "M-RoPE is not supported in trajectory level yet."
@@ -1066,6 +1078,20 @@ class AgentModeDaemon:
                     # turn_index_list.append(current_merged_trace_idx)
         else:
             raise ValueError(f"Unknown trace_aggregator level: {self.trace_aggregator.get('level')}")
+
+        print(f"\n[reward-dump] step {global_steps} | {len(_dump)} transitions")
+        print(f"{'data_id':>9} {'rollout':>8} {'turn':>5} {'final_r':>9} {'turn_r':>9} "
+              f"{'used':>9} {'n_prompt':>9} {'n_resp':>8}")
+        for d, ro, t, fr, tr, us, np_, nr in sorted(_dump):
+            trs = "None" if tr is None else f"{tr:.4f}"
+            print(f"{d:>9} {ro:>8} {t:>5} {fr:>9.4f} {trs:>9} {us:>9.4f} {np_:>9} {nr:>8}")
+        _byro = defaultdict(list)
+        for d, ro, t, fr, tr, us, np_, nr in sorted(_dump):
+            _byro[ro].append(round(us, 4))
+        print("[reward-dump] per-rollout used-reward vectors (turn order):")
+        for ro, v in _byro.items():
+            print(f"    {ro}: {v}")
+        print()
 
         group_rewards: Dict[str, List[float]] = defaultdict(list)
         for data_id, reward in zip(data_id_list, reward_list):
