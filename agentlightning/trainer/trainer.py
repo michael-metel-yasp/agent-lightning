@@ -25,10 +25,6 @@ from .init_utils import build_component, instantiate_component
 from .legacy import TrainerLegacy
 from .registry import ExecutionStrategyRegistry
 
-import numpy as np
-import torch
-from verl.trainer.ppo.core_algos import register_adv_est
-
 logger = logging.getLogger(__name__)
 
 T_co = TypeVar("T_co", covariant=True)
@@ -36,20 +32,6 @@ T = TypeVar("T")
 
 ComponentSpec = Union[T, type[T], Callable[[], T], str, Dict[str, Any], None]
 
-@register_adv_est("grpo_no_baseline")
-def compute_grpo_no_baseline_advantage(
-    token_level_rewards: torch.Tensor,
-    response_mask: torch.Tensor,
-    index: np.ndarray,
-    epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: bool = True,
-    config=None,
-    **kwargs,
-):
-    with torch.no_grad():
-        scores = token_level_rewards.sum(dim=-1)
-        scores = scores.unsqueeze(-1) * response_mask
-    return scores, scores
 
 class Trainer(TrainerLegacy):
     """High-level orchestration layer that wires Algorithm <-> Runner <-> Store.

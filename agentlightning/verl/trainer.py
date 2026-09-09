@@ -18,7 +18,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.core_algos import agg_loss, register_adv_est
 from verl.trainer.ppo.metric_utils import (
     _compute_response_info,
     compute_throughout_metrics,
@@ -44,6 +44,22 @@ __all__ = [
     "AgentLightningTrainer",
 ]
 
+@register_adv_est("grpo_no_baseline")
+def compute_grpo_no_baseline_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config=None,
+    **kwargs,
+):
+    """GRPO with the group-mean baseline removed: advantage == raw sequence reward.
+    """
+    with torch.no_grad():
+        scores = token_level_rewards.sum(dim=-1)
+        scores = scores.unsqueeze(-1) * response_mask
+    return scores, scores
 
 @contextmanager
 def _timer(name: str, timing_raw: Dict[str, float]):
