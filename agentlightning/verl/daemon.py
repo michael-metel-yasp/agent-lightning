@@ -218,6 +218,7 @@ class AgentModeDaemon:
         tokenizer: Any,
         mini_batch_size: int,
         pad_token_id: int,
+        val_rollout_n: int = 1,
         reward_fillna_value: float = 0.0,
         llm_timeout_seconds: float = 1200.0,
         mode: Literal["v0", "v1"] = "v1",
@@ -262,6 +263,7 @@ class AgentModeDaemon:
 
         # Training and Data Configuration
         self.train_rollout_n = train_rollout_n
+        self.val_rollout_n = val_rollout_n
         self.train_information = train_information
         self.mini_batch_size = mini_batch_size
         self.pad_token_id = pad_token_id
@@ -535,7 +537,8 @@ class AgentModeDaemon:
         # 2. Queue tasks for agents to process
         keys = list(data.keys())
         num_samples = len(data[keys[0]])
-        rollouts_per_sample = self.train_rollout_n if is_train else 1
+        # rollouts_per_sample = self.train_rollout_n if is_train else 1
+        rollouts_per_sample = self.train_rollout_n if is_train else self.val_rollout_n
 
         enqueue_rollout_requests: List[EnqueueRolloutRequest] = []
         data_id_to_original_sample: Dict[str, Dict[str, Any]] = {}
