@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 import uuid
-from collections import defaultdict
+from collections import defaultdict, Counter
 from collections.abc import Mapping
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 
@@ -30,6 +30,8 @@ __all__ = [
     "get_left_padded_ids_and_attention_mask",
     "get_right_padded_ids_and_attention_mask",
 ]
+
+LORA_NAME = "rl_adapter"
 
 
 def ids_startswith(
@@ -462,7 +464,7 @@ class AgentModeDaemon:
                     {
                         "model_name": model_name,
                         "litellm_params": {
-                            "model": "hosted_vllm/" + model_name,
+                            "model": "hosted_vllm/" + LORA_NAME,
                             "api_base": f"http://{address}/v1/",
                             "timeout": 31536000,
                             "stream_timeout": 31536000
@@ -923,7 +925,12 @@ class AgentModeDaemon:
             for rollout_id, sample_info in finished_id_to_sample_info.items():
                 for turn_index, trace in enumerate(sample_info["trace_list"]):
                     turn_reward = trace.get("reward")
-                    reward_list.append(sample_info["reward"] if turn_reward is None else float(turn_reward))
+                    assert turn_reward is not None, (
+                        f"transition {turn_index} of {rollout_id} has no per-turn reward; "
+                        f"the max() fallback would silently assign the episode best"
+                    )
+                    reward_list.append(float(turn_reward))            
+                    # reward_list.append(sample_info["reward"] if turn_reward is None else float(turn_reward))
                     # reward_list.append(sample_info["reward"])
                     prompt_ids, response_ids = trace["prompt_ids"], trace["response_ids"]
 
@@ -1096,16 +1103,38 @@ class AgentModeDaemon:
             print(f"    {ro}: {v}")
         print()
 
-        group_rewards: Dict[str, List[float]] = defaultdict(list)
-        for data_id, reward in zip(data_id_list, reward_list):
-            group_rewards[data_id].append(reward)
+        if n_trunc_sample_because_of_response:
+            raise RuntimeError(
+                f"{n_trunc_sample_because_of_response} responses exceeded "
+                f"max_response_length={max_response_length} and were truncated, but keep the "
+                f"reward earned by the untruncated text. Agent max_tokens must be <= this value."
+            )
+
+        # group_rewards: Dict[str, List[float]] = defaultdict(list)
+        # for data_id, reward in zip(data_id_list, reward_list):
+        #     group_rewards[data_id].append(reward)
+        # n_singleton = sum(1 for rs in group_rewards.values() if len(rs) == 1)
+        # n_zero_var = sum(1 for rs in group_rewards.values() if len(rs) > 1 and np.std(rs) == 0.0)
+        # if n_singleton or n_zero_var:
+        #     print(
+        #         f"Step {global_steps}: {n_singleton} single-row and {n_zero_var} zero-variance "
+        #         f"groups out of {len(group_rewards)}. Single-row groups get raw reward as advantage."
+        #     )
+
+        group_rewards: Dict[tuple, List[float]] = defaultdict(list)
+        for data_id, turn_index, reward in zip(data_id_list, turn_index_list, reward_list):
+            group_rewards[(data_id, turn_index)].append(reward)
+        sizes = Counter(len(rs) for rs in group_rewards.values())
         n_singleton = sum(1 for rs in group_rewards.values() if len(rs) == 1)
         n_zero_var = sum(1 for rs in group_rewards.values() if len(rs) > 1 and np.std(rs) == 0.0)
-        if n_singleton or n_zero_var:
-            print(
-                f"Step {global_steps}: {n_singleton} single-row and {n_zero_var} zero-variance "
-                f"groups out of {len(group_rewards)}. Single-row groups get raw reward as advantage."
-            )
+        n_rows_dead = sum(len(rs) for rs in group_rewards.values()
+                        if len(rs) > 1 and np.std(rs) == 0.0)
+        print(
+            f"Step {global_steps}: {len(group_rewards)} GRPO groups keyed (task, turn); "
+            f"sizes={dict(sorted(sizes.items()))} | {n_singleton} singletons "
+            f"(unbaselined: advantage = raw reward) | {n_zero_var} zero-variance groups "
+            f"covering {n_rows_dead}/{len(reward_list)} rows (no gradient)."
+        )
 
 
         n_transition = len(input_ids_list)

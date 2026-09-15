@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import random
+import requests
+import os
+from .daemon import AgentModeDaemon, LORA_NAME
 from contextlib import contextmanager
 from copy import deepcopy
 from pprint import pprint
@@ -37,8 +40,6 @@ from verl.utils.tracking import Tracking
 from agentlightning.adapter import TraceAdapter, TraceToTripletBase
 from agentlightning.llm_proxy import LLMProxy
 from agentlightning.store.base import LightningStore
-
-from .daemon import AgentModeDaemon
 
 __all__ = [
     "AgentLightningTrainer",
@@ -210,6 +211,7 @@ class AgentLightningTrainer(RayPPOTrainer):
         test_batch = DataProto.from_single_dict(test_data)
 
         self.async_rollout_manager.wake_up()
+        self._reload_lora()
         self.agent_mode_daemon.set_up_data_and_server(
             test_batch.non_tensor_batch,
             self.async_rollout_manager.server_addresses,
@@ -266,6 +268,7 @@ class AgentLightningTrainer(RayPPOTrainer):
             # generate a batch
             with _timer("gen", timing_raw):
                 self.async_rollout_manager.wake_up()
+                self._reload_lora()
                 self.agent_mode_daemon.set_up_data_and_server(
                     gen_batch.non_tensor_batch, self.async_rollout_manager.server_addresses
                 )
@@ -305,7 +308,10 @@ class AgentLightningTrainer(RayPPOTrainer):
                     del gen_baseline_batch, gen_baseline_output
 
             # uid is used for algorithm like GRPO, should be aligned to data id
-            batch.non_tensor_batch["uid"] = batch.non_tensor_batch["data_id_list"]
+            # batch.non_tensor_batch["uid"] = batch.non_tensor_batch["data_id_list"]
+            batch.non_tensor_batch["uid"] = np.array([
+                f"{d}:{t}" for d, t in zip(batch.non_tensor_batch["data_id_list"],
+                                        batch.non_tensor_batch["turn_index_list"])])
 
             if "response_mask" not in batch.batch:
                 batch.batch["response_mask"] = compute_response_mask(batch)
@@ -472,6 +478,26 @@ class AgentLightningTrainer(RayPPOTrainer):
 
         return metrics
 
+    def _reload_lora(self):
+        if getattr(self, "_pending_adapter", None) is None:
+            return
+        path = self._pending_adapter
+        for address in self.async_rollout_manager.server_addresses:
+            base = f"http://{address}"
+            try:
+                requests.post(f"{base}/v1/unload_lora_adapter",
+                              json={"lora_name": LORA_NAME}, timeout=120)
+            except Exception as exc:
+                print(f"[lora] unload {address}: {exc}", flush=True)
+            resp = requests.post(f"{base}/v1/load_lora_adapter",
+                                 json={"lora_name": LORA_NAME, "lora_path": path}, timeout=600)
+            print(f"[lora] step {self.global_steps} {address}: "
+                  f"{resp.status_code} {resp.text[:200]}", flush=True)
+            if resp.status_code != 200:
+                raise RuntimeError(f"LoRA load failed on {address}: {resp.text[:500]}")
+        self._pending_adapter = None
+
+
     def fit(self):
         logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -479,7 +505,12 @@ class AgentLightningTrainer(RayPPOTrainer):
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
-
+        if (self.config.actor_rollout_ref.model.get("lora_rank", 0) > 0
+                and self.config.trainer.save_freq != 1):
+            raise ValueError(
+                f"save_freq={self.config.trainer.save_freq} with LoRA: the adapter is pushed to "
+                f"vLLM only after a checkpoint, so rollouts would use stale weights. Set save_freq=1."
+            )
         self.global_steps = 0
 
         # load checkpoint before doing anything
@@ -517,6 +548,10 @@ class AgentLightningTrainer(RayPPOTrainer):
             trace_aggregator=self.config.agentlightning.trace_aggregator,
         )
         self.agent_mode_daemon.start()
+        self._save_checkpoint()
+        self._pending_adapter = os.path.join(
+            self.config.trainer.default_local_dir,
+            f"global_step_{self.global_steps}", "actor", "lora_adapter")
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -561,6 +596,9 @@ class AgentLightningTrainer(RayPPOTrainer):
                 ):
                     with _timer("save_checkpoint", timing_raw):
                         self._save_checkpoint()
+                        self._pending_adapter = os.path.join(
+                            self.config.trainer.default_local_dir,
+                            f"global_step_{self.global_steps}", "actor", "lora_adapter")
 
                 # step metrics
                 metrics.update(

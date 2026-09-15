@@ -19,7 +19,7 @@ def _unwrap_ray_remote(cls):
     return cls
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=1, runtime_env={"env_vars": {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "1"}})
 class PatchedvLLMServer(_unwrap_ray_remote(AsyncvLLMServer)):
 
     def __init__(self, *args, **kwargs):
