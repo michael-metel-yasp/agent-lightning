@@ -413,18 +413,16 @@ class AgentLightningTrainer(RayPPOTrainer):
                 batch.batch["is_drop_mask"].shape[0] - keep_indices.shape[0]
             )
             batch = batch[keep_indices]
-            # next, round to minibatch size
-            mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+            # Keep every remaining transition: no flooring to a multiple of the mini-batch size.
+            # verl splits the batch with DataProto.split, which accepts a short final chunk,
+            # and with n_gpus_per_node=1 there is no divisibility requirement.
             n_transition = len(batch)
             random_indices = list(range(n_transition))
             random.shuffle(random_indices)
             batch.reorder(torch.tensor(random_indices).type(torch.int32))
-            n_remained_transition = n_transition // mini_batch_size * mini_batch_size
-            batch = batch[list(range(n_remained_transition))]
-            metrics["training/n_triplets_dropped_remainder"] = n_transition - n_remained_transition
-            if n_remained_transition == 0:
-                print(f"Step {self.global_steps}: only {n_transition} transitions after drops "
-                      f"(< ppo_mini_batch_size={mini_batch_size}); skipping update.")
+            metrics["training/n_triplets_dropped_remainder"] = 0
+            if n_transition == 0:
+                print(f"Step {self.global_steps}: no transitions after drops; skipping update.")
                 return metrics
 
             # Agent mode note: Change the order of balance batch;

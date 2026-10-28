@@ -665,7 +665,8 @@ class AgentModeDaemon:
         #             final_reward = triplet.reward
         #             break
         rewards_present = [t.reward for t in triplets if t.reward is not None]
-        final_reward = max(rewards_present) if rewards_present else None
+        # final_reward = max(rewards_present) if rewards_present else None
+        final_reward = sum(rewards_present) if rewards_present else None
 
         # Construct the Task object from Rollout
         task = Task(
